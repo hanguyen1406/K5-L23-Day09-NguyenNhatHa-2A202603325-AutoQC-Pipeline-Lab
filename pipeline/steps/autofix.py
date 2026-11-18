@@ -33,7 +33,87 @@ import yaml  # noqa: F401
 
 from ..common import ERROR, parse_yolo_line  # noqa: F401
 
+DROP_CODES = {"BAD_FORMAT", "BAD_CLASS_ID", "BOX_ZERO", "DUP_BOX"}
+LINE_CODES = DROP_CODES | {"BOX_OUT_OF_IMAGE"}
+REMOVE_CODES = {"DUP_IMAGE_EXACT", "DUP_IMAGE_NEAR", "LEAK_TEST", "CORRUPT_IMAGE", "BAD_SIZE"}
+
+
+def _clip_box(box):
+    """Cắt box (cx, cy, w, h) về [0,1]; None nếu sau khi cắt không còn diện tích."""
+    cls, cx, cy, w, h = box
+    x1, y1 = max(0.0, cx - w / 2), max(0.0, cy - h / 2)
+    x2, y2 = min(1.0, cx + w / 2), min(1.0, cy + h / 2)
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return cls, (x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1
+
+
+def _fmt(box):
+    cls, cx, cy, w, h = box
+    return f"{cls} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}"
+
 
 def fix(ds, issues, cfg):
-    # TODO
-    raise NotImplementedError("autofix chưa làm")
+    fixes = []
+    errors = [i for i in issues if i.severity == ERROR]
+
+    # 1) Xoá ảnh hỏng / trùng / rò rỉ (kèm file nhãn của nó)
+    removed = set()
+    for i in errors:
+        if i.code in REMOVE_CODES and i.image not in removed:
+            img = ds.image_path(i.image)
+            if img is None:
+                continue
+            img.unlink()
+            ds.label_path(i.image).unlink(missing_ok=True)
+            removed.add(i.image)
+            fixes.append(dict(image=i.image, line="", action="remove_image",
+                              before=img.name, after="(đã xoá ảnh + nhãn)"))
+
+    # 2) Ghi lại tên lớp trong data.yaml (một lần là đủ)
+    if any(i.code == "BAD_CLASS_NAME" for i in errors):
+        before = ds.yaml_names()
+        ds.yaml_path.write_text(
+            yaml.safe_dump({"path": ".", "names": list(cfg["classes"])}, sort_keys=False, allow_unicode=True),
+            encoding="utf-8")
+        fixes.append(dict(image="data.yaml", line="", action="rename_classes",
+                          before=str(before), after=str(list(cfg["classes"]))))
+
+    # 3) Sửa từng file nhãn MỘT lần: gom lỗi theo số dòng gốc
+    per_img = defaultdict(lambda: defaultdict(set))
+    for i in errors:
+        if i.code in LINE_CODES and i.line is not None and i.image not in removed:
+            per_img[i.image][i.line].add(i.code)
+    for stem in sorted(per_img):
+        path = ds.label_path(stem)
+        if not path.exists():
+            continue
+        raw = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        out = []
+        for no, text in enumerate(raw, 1):
+            codes = per_img[stem].get(no)
+            if not codes:
+                out.append(text)
+                continue
+            if codes & DROP_CODES:                      # xoá dòng thắng clip_box
+                fixes.append(dict(image=stem, line=no, action="drop_line", before=text, after=""))
+                continue
+            clipped = _clip_box(parse_yolo_line(text))
+            if clipped is None:                         # cắt xong rỗng -> xoá dòng
+                fixes.append(dict(image=stem, line=no, action="drop_line", before=text, after=""))
+                continue
+            new = _fmt(clipped)
+            out.append(new)
+            fixes.append(dict(image=stem, line=no, action="clip_box", before=text, after=new))
+        path.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
+
+    # 4) Ảnh chưa có nhãn: không bịa file, chuyển người gán
+    seen_missing = set()
+    for i in errors:
+        if (i.code == "MISSING_LABEL_FILE" and i.image not in removed
+                and i.image not in seen_missing and ds.image_path(i.image) is not None):
+            seen_missing.add(i.image)
+            fixes.append(dict(image=i.image, line="", action="needs_label",
+                              before="(không có file)", after="chuyển người gán"))
+
+    return fixes

@@ -59,7 +59,34 @@ Nguồn: `02_error_list_v1.csv` — 36 error + 112 warn trên 202 ảnh đã nh�
 
 ## 5. Train: raw vs clean
 
-**Chưa chạy train** (chưa có GPU/Colab trong thời gian làm bài), nên không có bảng `comparison.md` và **không kết luận** clean tốt hơn raw. Kế hoạch khi có T4: mở `notebooks/day09_train_compare.ipynb`, train yolo26n 20 epoch, 2 seed, cùng val/test cho `raw` và `clean`; sau đó so chênh lệch mAP50 với độ lệch giữa các seed. Nếu chênh lệch nằm trong nhiễu (test chỉ 100 ảnh), báo cáo là **chưa kết luận được**; các giả thuyết cần kiểm là ảnh trùng/rò rỉ test trong `raw`, nhãn máy còn sót trong `clean`, và box lỏng ở cả hai.
+Đã chạy trên Colab T4: `yolo26n.pt`, 20 epoch, batch 16, imgsz 640, 2 seed (0, 1), cùng `data/gold_val` (40 ảnh) và `data/test` (100 ảnh).
+
+| biến thể | #ảnh train | seed | mAP50 | mAP50-95 | precision | recall |
+|---|---:|---:|---:|---:|---:|---:|
+| raw | 224 | 0 | 0,7256 | 0,5144 | 0,8068 | 0,6291 |
+| raw | 224 | 1 | 0,7259 | 0,5090 | 0,7203 | 0,6689 |
+| clean | 202 | 0 | 0,7286 | 0,5021 | 0,8079 | 0,6091 |
+| clean | 202 | 1 | 0,7013 | 0,4824 | 0,7826 | 0,6038 |
+
+Trung bình ± độ lệch giữa seed (từ `comparison.md`):
+
+| biến thể | mAP50 | mAP50-95 | precision | recall |
+|---|---:|---:|---:|---:|
+| raw | 0,726 ± 0,000 | 0,512 ± 0,004 | 0,764 ± 0,061 | 0,649 ± 0,028 |
+| clean | 0,715 ± 0,019 | 0,492 ± 0,014 | 0,795 ± 0,018 | 0,606 ± 0,004 |
+
+**Chênh mAP50 (clean − raw) = −0,011**, nhỏ hơn độ lệch chuẩn giữa seed của clean (0,019; ~0,56σ) → **nằm trong nhiễu, chưa kết luận clean tốt hơn hay kém hơn**. mAP50-95 chênh −0,020 (~1,4σ của clean) và recall chênh −0,043 (~1,5σ của raw): có *dấu hiệu* clean giảm recall, nhưng với 2 seed và test 100 ảnh chưa đủ để khẳng định.
+
+AP50 theo lớp (trung bình 2 seed): car 0,738 → 0,731 (−0,007); person 0,822 → 0,828 (+0,006); **truck 0,648 → 0,589 (−0,060, mức giảm lớn nhất)**; bus 0,695 → 0,713 (+0,018). Truck chỉ có 30 box trong clean nên AP rất nhạy với vài ảnh.
+
+**Giả thuyết và cách kiểm:**
+
+1. **Clean ít dữ liệu hơn:** bỏ 22 ảnh (5 leak, 8 exact, 4 near, 2 hỏng, 3 nhỏ) nên còn 202; recall giảm phù hợp với ít ảnh hơn. Kiểm: train clean + 12 ảnh trùng (8 exact + 4 near, không thêm leak) rồi so lại.
+2. **Raw bị thổi phồng bởi 5 ảnh leak test:** 5 ảnh test nằm trong raw có thể giúp mAP; kiểm bằng cách đánh giá lại trên test đã bỏ đúng 5 ảnh đó, hoặc train raw không có chúng.
+3. **Clean còn nhãn rỗng/nhiễu:** 6 ảnh `EMPTY_LABEL` chưa duyệt và 22 ảnh ngoài ngân sách (9 `POSSIBLE_FALSE_POS`) có thể dạy model "nền" sai; truck AP giảm mạnh có thể do vài ảnh truck bị ảnh hưởng. Kiểm: mở 6 ảnh nhãn rỗng, xác nhận nền hay thiếu nhãn, rồi train lại clean đã bỏ chúng.
+4. **Nhiễu do 2 seed/test nhỏ:** clean mAP50 dao động 0,019 giữa 2 seed, AP từng lớp còn dao động hơn (truck ±0,035); kiểm bằng ≥ 5 seed và test lớn hơn. Đồng thời đọc log cell 7: nếu Ultralytics bỏ ảnh/nhãn hỏng của raw thì "224 ảnh" chỉ là số materialize, raw thực tế train ít hơn.
+
+**Việc tiếp theo:** tăng lên 5 seed, đánh giá trên test lớn hơn, và chạy thí nghiệm loại 5 ảnh leak khỏi raw để tách hiệu ứng "sạch" khỏi hiệu ứng "bớt rò rỉ". Chưa nên dùng kết quả này để khẳng định pipeline cải thiện model.
 
 ## 6. Quyết định và ghi chú AI
 
